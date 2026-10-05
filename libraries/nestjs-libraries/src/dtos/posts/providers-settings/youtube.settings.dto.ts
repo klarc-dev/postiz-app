@@ -15,6 +15,7 @@ import {
 } from 'class-validator';
 import { MediaDto } from '@gitroom/nestjs-libraries/dtos/media/media.dto';
 import { Type } from 'class-transformer';
+import { JSONSchema } from 'class-validator-jsonschema';
 
 // YouTube caps the combined length of all tags at 500 characters.
 // Tags containing whitespace are wrapped in quotes by YouTube, which adds
@@ -73,6 +74,15 @@ export class YoutubeSettingsDto {
   @IsIn(['public', 'private', 'unlisted'])
   @IsDefined()
   type: string;
+
+  @IsString()
+  @MinLength(1)
+  @IsDefined()
+  @JSONSchema({
+    description:
+      'The YouTube playlist id from the getPlaylists integration tool. The upload is not complete until the video belongs to this playlist.',
+  })
+  playlistId: string;
 
   @IsIn(['yes', 'no'])
   @IsOptional()

@@ -24,6 +24,7 @@ import { createReadStream, statSync } from 'fs';
 import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import { setHeartbeatDetails } from '@gitroom/nestjs-libraries/temporal/temporal.heartbeat';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
+import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 
 const clientAndYoutube = () => {
   const client = new google.auth.OAuth2({
@@ -53,7 +54,9 @@ const clientAndYoutube = () => {
   return { client, youtube, oauth2, youtubeAnalytics };
 };
 
-@Rules('YouTube must have on video attachment, it cannot be empty')
+@Rules(
+  'YouTube must have one video attachment and a playlistId resolved from the getPlaylists tool. Publishing is not complete until the video belongs to that playlist.'
+)
 export class YoutubeProvider extends SocialAbstract implements SocialProvider {
   override maxConcurrentJob = 200; // YouTube has strict upload quotas
   identifier = 'youtube';
@@ -414,6 +417,65 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
+  @Tool({
+    description:
+      'List every playlist owned by the connected YouTube channel. Use the returned id as playlistId; do not guess from a title.',
+    dataSchema: [],
+  })
+  async getPlaylists(accessToken: string) {
+    const { client, youtube } = clientAndYoutube();
+    client.setCredentials({ access_token: accessToken });
+    const youtubeClient = youtube(client);
+    const playlists: Array<{ id: string; name: string }> = [];
+    let pageToken: string | undefined;
+
+    do {
+      const response = await youtubeClient.playlists.list({
+        part: ['snippet'],
+        mine: true,
+        maxResults: 50,
+        pageToken,
+      });
+
+      for (const playlist of response.data.items ?? []) {
+        if (playlist.id) {
+          playlists.push({
+            id: playlist.id,
+            name: playlist.snippet?.title || 'Untitled playlist',
+          });
+        }
+      }
+
+      pageToken = response.data.nextPageToken || undefined;
+    } while (pageToken);
+
+    return playlists;
+  }
+
+  private async validateOwnedPlaylist(
+    accessToken: string,
+    playlistId: string,
+    channelId: string
+  ) {
+    const { client, youtube } = clientAndYoutube();
+    client.setCredentials({ access_token: accessToken });
+    const response = await youtube(client).playlists.list({
+      part: ['snippet'],
+      id: [playlistId],
+      maxResults: 1,
+    });
+    const playlist = response.data.items?.[0];
+
+    if (!playlist || playlist.snippet?.channelId !== channelId) {
+      throw new BadBody(
+        this.identifier,
+        '{}',
+        '{}',
+        'The selected playlist does not exist on the connected YouTube channel. Resolve it again with getPlaylists.'
+      );
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // RESUMABLE UPLOAD (no more videos.insert): YouTube only creates the video
   // resource when the final byte of the session is received, so a failed or
@@ -560,6 +622,11 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
 
     const { settings }: { settings: YoutubeSettingsDto } = firstPost;
     const path = firstPost?.media?.[0]?.path!;
+    await this.validateOwnedPlaylist(
+      accessToken,
+      settings.playlistId,
+      integration.internalId
+    );
     const videoSize = await this.youtubeMediaSize(path);
 
     // Start a resumable upload session: nothing exists on the channel until
@@ -613,6 +680,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
           path,
           uploadedBytes: 0,
           thumbnail: settings?.thumbnail?.path || '',
+          playlistId: settings.playlistId,
         },
       },
     ];
@@ -626,6 +694,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       path: string;
       uploadedBytes: number;
       thumbnail: string;
+      playlistId: string;
       videoId?: string;
     },
     integration: Integration
@@ -648,7 +717,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
 
     // the upload completed: the video exists, only the thumbnail may be left
     if ('videoId' in probe) {
-      if (pendingData.thumbnail) {
+      if (pendingData.thumbnail || pendingData.playlistId) {
         return {
           status: 'ready',
           pendingData: { ...pendingData, videoId: probe.videoId },
@@ -677,6 +746,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       path: string;
       uploadedBytes: number;
       thumbnail: string;
+      playlistId: string;
       videoId?: string;
     },
     integration: Integration
@@ -809,6 +879,33 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
           },
         })
       );
+    }
+
+    if (pendingData.playlistId) {
+      const { client, youtube } = clientAndYoutube();
+      client.setCredentials({ access_token: accessToken });
+      const youtubeClient = youtube(client);
+      const existing = await youtubeClient.playlistItems.list({
+        part: ['id'],
+        playlistId: pendingData.playlistId,
+        videoId,
+        maxResults: 1,
+      });
+
+      if (!existing.data.items?.length) {
+        await youtubeClient.playlistItems.insert({
+          part: ['snippet'],
+          requestBody: {
+            snippet: {
+              playlistId: pendingData.playlistId,
+              resourceId: {
+                kind: 'youtube#video',
+                videoId,
+              },
+            },
+          },
+        });
+      }
     }
 
     return {
