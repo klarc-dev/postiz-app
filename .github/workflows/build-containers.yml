@@ -22,14 +22,7 @@ jobs:
 
   build-containers:
     needs: build-containers-common
-    strategy:
-      matrix:
-        include:
-          - runnertags: ubuntu-latest
-            arch: amd64
-          - runnertags: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runnertags }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,56 +37,23 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ github.token }}
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Build and Push Image
         env:
           CONTAINERVER: ${{ needs.build-containers-common.outputs.containerver }}
           NEXT_PUBLIC_VERSION: ${{ needs.build-containers-common.outputs.containerver }}
         run: |
-          docker buildx build --platform linux/${{ matrix.arch }} \
+          docker buildx build --platform linux/amd64 \
             -f Dockerfile.dev \
-            -t ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}-${{ matrix.arch }} \
+            -t ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }} \
             --build-arg NEXT_PUBLIC_VERSION=${{ env.NEXT_PUBLIC_VERSION }} \
             --pull \
             --no-cache \
             --provenance=false --sbom=false \
-            --output "type=registry,name=ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}-${{ matrix.arch }}" .
+            --output "type=registry,name=ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}" .
 
-  build-container-manifest:
-    needs: [build-containers, build-containers-common]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Login to ghcr
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Create Docker Manifest
+      - name: Verify image
         env:
           CONTAINERVER: ${{ needs.build-containers-common.outputs.containerver }}
-        run: |
-          # Verify the architecture images
-          echo "Verifying AMD64 image:"
-          docker buildx imagetools inspect ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}-amd64
-
-          echo "Verifying ARM64 image:"
-          docker buildx imagetools inspect ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}-arm64
-
-          # Replace only the requested versioned manifest.
-          docker manifest rm ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }} || true
-
-          # Create and push the version-specific manifest
-          docker manifest create ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }} \
-            --amend ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}-amd64 \
-            --amend ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}-arm64
-
-          docker manifest push ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}
-
-      - name: Verify Manifest
-        env:
-          CONTAINERVER: ${{ needs.build-containers-common.outputs.containerver }}
-        run: |
-          docker manifest inspect ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}
+        run: docker buildx imagetools inspect ghcr.io/klarc-dev/postiz-app:${{ env.CONTAINERVER }}
